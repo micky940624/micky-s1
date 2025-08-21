@@ -1,6 +1,8 @@
 // SMS API Configuration
 const SMS_API_KEY = import.meta.env.VITE_SMS_API_KEY;
 const SMS_API_URL = 'https://2factor.in/API/V1';
+// Use server-side Netlify Function if configured (safer: keeps provider keys server-side)
+const USE_SERVER_SMS = import.meta.env.VITE_USE_SERVER_SMS === 'true';
 
 // Proper environment detection
 const isDevelopment = import.meta.env.DEV === true;
@@ -164,7 +166,49 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
     saveOTPStorage(otpStorage);
 
     // Try to send via SMS API if configured
-    if (SMS_API_KEY) {
+    if (USE_SERVER_SMS) {
+      try {
+        // Call Netlify Function which proxies to Twilio (or any provider) using server-side env vars
+        const resp = await fetch('/.netlify/functions/send-otp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone: cleanPhone, message: `Your verification code is ${newOTP}` })
+        });
+
+        const json = await resp.json();
+        if (resp.ok && json.success) {
+          updateRateLimit(phoneNumber);
+          return { success: true, message: 'OTP sent via server SMS' , ...(DEV_OTP_DISPLAY && { devOTP: newOTP }) };
+        }
+
+        console.warn('Server SMS function failed:', json);
+        // Remove stored OTP if server SMS failed
+        otpStorage.delete(phoneNumber);
+        saveOTPStorage(otpStorage);
+
+        if (isDevelopment) {
+          updateRateLimit(phoneNumber);
+          return {
+            success: true,
+            message: 'OTP generated successfully (Server SMS failed - Development Mode)',
+            devOTP: newOTP
+          };
+        }
+
+        return { success: false, message: 'Failed to send OTP via server SMS', error: 'SERVER_SMS_FAILED' };
+      } catch (apiError) {
+        console.warn('Server SMS API error:', apiError);
+        otpStorage.delete(phoneNumber);
+        saveOTPStorage(otpStorage);
+
+        if (isDevelopment) {
+          updateRateLimit(phoneNumber);
+          return { success: true, message: 'OTP generated successfully (Server SMS failed - Development Mode)', devOTP: newOTP };
+        }
+
+        return { success: false, message: 'Failed to send OTP. Please try again later.', error: 'API_ERROR' };
+      }
+    } else if (SMS_API_KEY) {
       try {
         const response = await fetch(`${SMS_API_URL}/${SMS_API_KEY}/SMS/${cleanPhone}/AUTOGEN/OTP1`, {
           method: 'GET',
@@ -244,14 +288,14 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
           error: 'API_ERROR'
         };
       }
-    } else {
+  } else {
       // No API key configured
       // Remove stored OTP since we can't send SMS
       otpStorage.delete(phoneNumber);
       saveOTPStorage(otpStorage);
       
       // In development mode, allow OTP generation for testing
-      if (isDevelopment) {
+  if (isDevelopment) {
         updateRateLimit(phoneNumber);
         return {
           success: true,
