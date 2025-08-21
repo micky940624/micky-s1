@@ -7,7 +7,7 @@ To use the OTP system, you need to create a `.env.local` file in your project ro
 ```env
 # SMS API Configuration
 # Get your API key from https://2factor.in/
-VITE_SMS_API_KEY=your_actual_api_key_here
+VITE_SMS_API_KEY=123456789
 
 # Application Configuration
 VITE_APP_NAME=InvenEase
