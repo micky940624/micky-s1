@@ -2,7 +2,9 @@
 const SMS_API_KEY = import.meta.env.VITE_SMS_API_KEY;
 const SMS_API_URL = 'https://2factor.in/API/V1';
 // Use server-side Netlify Function if configured (safer: keeps provider keys server-side)
-const USE_SERVER_SMS = import.meta.env.VITE_USE_SERVER_SMS === 'true';
+// Accept boolean true, 'true', or '1'
+const rawUseServer = import.meta.env.VITE_USE_SERVER_SMS;
+const USE_SERVER_SMS = rawUseServer === true || rawUseServer === 'true' || rawUseServer === '1';
 
 // Proper environment detection
 const isDevelopment = import.meta.env.DEV === true;
@@ -44,6 +46,7 @@ export const getSystemStatus = () => {
     isDevelopment,
     isProduction,
     hasSMSAPI,
+  useServerSMS: USE_SERVER_SMS,
     isProductionReady: isProductionReady(),
     devOTPDisplay: DEV_OTP_DISPLAY
   };
@@ -169,19 +172,21 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
     if (USE_SERVER_SMS) {
       try {
         // Call Netlify Function which proxies to Twilio (or any provider) using server-side env vars
-        const resp = await fetch('/.netlify/functions/send-otp', {
+        // Use absolute URL to avoid issues with path base
+        const functionUrl = (typeof window !== 'undefined' && window.location ? `${window.location.origin}/.netlify/functions/send-otp` : '/.netlify/functions/send-otp');
+        const resp = await fetch(functionUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ phone: cleanPhone, message: `Your verification code is ${newOTP}` })
         });
 
-        const json = await resp.json();
-        if (resp.ok && json.success) {
+        const json = await resp.json().catch(() => ({}));
+        if (resp.ok && json && json.success) {
           updateRateLimit(phoneNumber);
           return { success: true, message: 'OTP sent via server SMS' , ...(DEV_OTP_DISPLAY && { devOTP: newOTP }) };
         }
 
-        console.warn('Server SMS function failed:', json);
+        console.warn('Server SMS function failed:', resp.status, json);
         // Remove stored OTP if server SMS failed
         otpStorage.delete(phoneNumber);
         saveOTPStorage(otpStorage);
@@ -195,7 +200,7 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
           };
         }
 
-        return { success: false, message: 'Failed to send OTP via server SMS', error: 'SERVER_SMS_FAILED' };
+  return { success: false, message: json?.message || 'Failed to send OTP via server SMS', error: 'SERVER_SMS_FAILED' };
       } catch (apiError) {
         console.warn('Server SMS API error:', apiError);
         otpStorage.delete(phoneNumber);
@@ -206,7 +211,7 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
           return { success: true, message: 'OTP generated successfully (Server SMS failed - Development Mode)', devOTP: newOTP };
         }
 
-        return { success: false, message: 'Failed to send OTP. Please try again later.', error: 'API_ERROR' };
+  return { success: false, message: (apiError as any)?.message || 'Failed to send OTP. Please try again later.', error: 'API_ERROR' };
       }
     } else if (SMS_API_KEY) {
       try {
@@ -387,8 +392,13 @@ export const verifyOTP = (phoneNumber: string, inputOTP: string): SMSResponse =>
 
 export const generateOTP = (): string => {
   // Use crypto.randomInt for better security if available
-  if (typeof crypto !== 'undefined' && crypto.randomInt) {
-    return crypto.randomInt(100000, 999999).toString();
+  try {
+    const c = (globalThis as any).crypto;
+    if (c && typeof c.randomInt === 'function') {
+      return c.randomInt(100000, 999999).toString();
+    }
+  } catch (e) {
+    // ignore and fallback
   }
   // Fallback to Math.random (less secure but functional)
   return Math.floor(Math.pow(10, OTP_CONFIG.LENGTH - 1) + Math.random() * Math.pow(10, OTP_CONFIG.LENGTH - 1)).toString();
@@ -432,7 +442,6 @@ export const clearOTP = (phoneNumber: string): void => {
 // Rate limiting functions
 const checkRateLimit = (phoneNumber: string): { allowed: boolean; waitTime?: number } => {
   const now = Date.now();
-  const hourAgo = now - (60 * 60 * 1000);
   
   const rateLimit = rateLimitStorage.get(phoneNumber);
   
@@ -453,7 +462,6 @@ const checkRateLimit = (phoneNumber: string): { allowed: boolean; waitTime?: num
 };
 
 const updateRateLimit = (phoneNumber: string): void => {
-  const now = Date.now();
   const rateLimit = rateLimitStorage.get(phoneNumber);
   
   if (rateLimit) {
